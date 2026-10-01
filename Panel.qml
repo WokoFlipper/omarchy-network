@@ -76,6 +76,30 @@ Panel {
   property string dnsProvider: ""
   property string pendingDnsProvider: ""
   property string dnsProtocol: "DoT"
+  // Last measured throughput ("down up" in Mbps, from our own speed test).
+  // Shown rounded in the header; persisted so it survives restarts.
+  property string measuredDown: ""
+  property string measuredUp: ""
+  property bool measuringSpeed: false
+  property string speedPhase: ""
+  readonly property string measuredCachePath: Quickshell.env("HOME") + "/.cache/omarchy/wifi-dns-speed"
+  function roundSpeed(v) {
+    var n = parseFloat(v)
+    if (!isFinite(n) || n <= 0) return ""
+    return String(Math.max(1, Math.round(n / 10) * 10))
+  }
+  function measuredHeader() {
+    if (measuringSpeed) return "…"
+    if (measuredDown === "") return ""
+    return roundSpeed(measuredDown) + "mbit"
+  }
+  function loadMeasured() {
+    loadMeasuredProc.running = true
+  }
+  function saveMeasured() {
+    if (measuredDown === "" && measuredUp === "") return
+    Quickshell.execDetached(["bash", "-c", "printf '%s %s\\n' '" + measuredDown + "' '" + measuredUp + "' > '" + measuredCachePath + "'"])
+  }
   // Wi-Fi band state from `omarchy-network-band`. `bandCurrent` is the band
   // the radio is actually on; `bandSelected` is the pinned choice ("auto" when
   // nothing is pinned), and the two differ whenever Auto is in effect.
@@ -274,7 +298,7 @@ Panel {
     // Compat routes for configs that summon the centered cards through the
     // network target; both cards are their own plugins now.
     function showQr() { root.summonWifiQr(true) }
-    function speedTest() { root.summonSpeedTest() }
+    function speedTest() { root.runSpeedTest() }
   }
 
   function activateHeader() {
@@ -375,6 +399,7 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       refresh(true)
+      root.loadMeasured()
       selectedIndex = wifiNetworks.length > 0 ? 0 : -1
       wifiActionFocused = false
       focusSection = wifiNetworks.length > 0 ? "wifi" : "dns"
@@ -558,6 +583,8 @@ Panel {
   }
 
   function headerDetail() {
+    var m = measuredHeader()
+    if (m !== "") return m
     return Model.headerDetail(info)
   }
 
@@ -823,25 +850,9 @@ Panel {
     runNetworkAction("connect", networkForSsid(ssid), function(network) { network.connectWithPsk(passphrase) })
   }
 
-  function connectEnterprise(ssid, identity, passphrase) {
-    runNetworkAction("connect", networkForSsid(ssid), function(network) {
-      enterpriseConnect.secret = passphrase
-      enterpriseConnect.command = ["bash", "-c", Model.enterpriseConnectScript, "nmcli-eap", ssid, identity]
-      enterpriseConnect.running = true
-    })
-  }
-
-  // Creates and activates the 802.1X profile (see Model.enterpriseConnectScript).
-  // The password goes over stdin, never argv.
-  Process {
-    id: enterpriseConnect
-    property string secret: ""
-    stdinEnabled: true
-    onStarted: {
-      write(secret + "\n")
-      secret = ""
-    }
-  }
+  // NOTE: enterprise (EAP) support was removed here (see submitCredentials):
+  // the inherited PEAP/MSCHAPv2 profile path skips CA validation.
+  // Use system settings for enterprise networks.
 
   function disconnect(network) {
     runNetworkAction("disconnect", network || connectedWifiNetwork, function(net) { net.disconnect() })
@@ -950,6 +961,61 @@ Panel {
         root.refresh()
       }
     }
+  }
+
+  // Own throughput measurement: runs the stock CLI per direction, keeps the
+  // peak rate, persists it and shows it rounded in the header.
+  Process {
+    id: loadMeasuredProc
+    command: ["bash", "-c", "cat '" + Quickshell.env("HOME") + "/.cache/omarchy/wifi-dns-speed' 2>/dev/null || true"]
+    stdout: StdioCollector { id: loadMeasuredOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) return
+      var parts = loadMeasuredOut.text.trim().split(/\s+/)
+      if (parts.length >= 1 && parts[0] !== "") root.measuredDown = parts[0]
+      if (parts.length >= 2 && parts[1] !== "") root.measuredUp = parts[1]
+    }
+  }
+
+  Process {
+    id: speedProc
+    stdout: StdioCollector { id: speedOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.speedPhaseDone(speedOut.text)
+    }
+  }
+
+  function runSpeedTest() {
+    if (speedProc.running) return
+    controller.hide()
+    cancelPasswordPrompt()
+    root.measuringSpeed = true
+    root.measuredDown = ""
+    root.measuredUp = ""
+    root.speedPhase = "down"
+    speedProc.command = ["timeout", "12", "omarchy-network-speedtest", "down"]
+    speedProc.running = true
+  }
+
+  function speedPhaseDone(output) {
+    var best = 0
+    var lines = String(output || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var v = parseFloat(lines[i])
+      if (isFinite(v) && v > best) best = v
+    }
+    if (root.speedPhase === "down") {
+      if (best > 0) root.measuredDown = String(best)
+      root.speedPhase = "up"
+      speedProc.command = ["timeout", "12", "omarchy-network-speedtest", "up"]
+      speedProc.running = true
+      return
+    }
+    if (best > 0) root.measuredUp = String(best)
+    root.speedPhase = ""
+    root.measuringSpeed = false
+    root.saveMeasured()
+    root.refresh()
   }
 
   // Poll details while the panel is open so the IP/route header catches up
@@ -1201,7 +1267,7 @@ Panel {
             hasCursor: root.speedHeaderHasCursor
             Layout.alignment: Qt.AlignVCenter
             onHovered: function(on) { if (on) root.setHeaderCursor(root.speedHeaderIndex) }
-            onClicked: root.summonSpeedTest()
+            onClicked: root.runSpeedTest()
           }
 
           ToggleSwitch {
@@ -1747,7 +1813,13 @@ Panel {
     function submitCredentials() {
       if (!net || root.busy || root.passwordText.length === 0) return
       if (!isEnterprise) return root.connectWithPassphrase(net.ssid, root.passwordText)
-      if (root.identityText.length > 0) root.connectEnterprise(net.ssid, root.identityText, root.passwordText)
+      // Enterprise (EAP) is disabled in this fork: the inherited profile path
+      // creates PEAP/MSCHAPv2 without CA validation, letting a rogue AP with
+      // the same SSID capture the response (marketplace review on #9486).
+      // Use system settings for enterprise networks instead.
+      root.failureSsid = net.ssid
+      root.failureReason = "Enterprise Wi-Fi needs CA validation — unsupported here, use system settings"
+      root.passwordSsid = ""
     }
 
     Connections {
