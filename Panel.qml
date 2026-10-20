@@ -82,6 +82,9 @@ Panel {
   property string measuredUp: ""
   property bool measuringSpeed: false
   property string speedPhase: ""
+  readonly property string speedHelper: Qt.resolvedUrl("bin/speedtest-cautious").toString().replace(/^file:\/\//, "")
+  // Hardened local speed-test helper: caps its own process tree via ulimit, and the
+  // Fast.com API stage is byte-capped -> a compromised endpoint cannot balloon jq (omacom/omarchy#16037)
   readonly property string measuredCachePath: Quickshell.env("HOME") + "/.cache/omarchy/wifi-dns-speed"
   function roundSpeed(v) {
     var n = parseFloat(v)
@@ -1064,7 +1067,7 @@ Panel {
     root.measuredDown = ""
     root.measuredUp = ""
     root.speedPhase = "down"
-    speedProc.command = ["timeout", "12", "omarchy-network-speedtest", "down"]
+    speedProc.command = ["timeout", "12", root.speedHelper, "down"]
     speedProc.running = true
   }
 
@@ -1078,7 +1081,7 @@ Panel {
     if (root.speedPhase === "down") {
       if (best > 0) root.measuredDown = String(best)
       root.speedPhase = "up"
-      speedProc.command = ["timeout", "12", "omarchy-network-speedtest", "up"]
+      speedProc.command = ["timeout", "12", root.speedHelper, "up"]
       speedProc.running = true
       return
     }
@@ -2106,6 +2109,7 @@ Panel {
 
       TextField {
         id: idField
+        readOnly: !visible // No clipboard probe while hidden (q_canPasteChanged)
         visible: row.isEnterprise && !row.isBusy && !row.isFailed
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
@@ -2130,6 +2134,7 @@ Panel {
 
       TextField {
         id: caField
+        readOnly: !visible // No clipboard probe while hidden (q_canPasteChanged)
         visible: idField.visible
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
@@ -2151,6 +2156,7 @@ Panel {
 
       TextField {
         id: serverField
+        readOnly: !visible // No clipboard probe while hidden (q_canPasteChanged)
         visible: idField.visible
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
@@ -2172,6 +2178,7 @@ Panel {
 
       TextField {
         id: pwField
+        readOnly: !visible // No clipboard probe while hidden (q_canPasteChanged)
         visible: !row.isBusy && !row.isFailed
         anchors.left: parent.left
         anchors.right: connectPwBtn.left
