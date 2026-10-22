@@ -51,9 +51,21 @@ fi
 fast_token="YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm"
 fast_api_url="https://api.fast.com/netflix/speedtest/v2?https=true&token=$fast_token&urlCount=$url_count"
 
-fast_urls=$(curl -fsS --max-time 8 "$fast_api_url" 2>/dev/null | head -c 524288 | jq -r '.targets[]?.url // empty' 2>/dev/null) || fast_urls=""
+fast_urls=$(curl -q -fsS --max-time 8 "$fast_api_url" 2>/dev/null | head -c 524288 | jq -r '.targets[]?.url // empty' 2>/dev/null) || fast_urls=""
 
-if [[ -z $fast_urls ]]; then
+# A hostile or compromised API response must not be able to smuggle curl
+# options into the workers: a target entry such as "-K/tmp/evil.curlrc" would
+# otherwise be read by curl as an option (curl --config loads a config file).
+# Keep only plain https URLs, and pass `--` before every URL at the call sites
+# as a second belt.
+urls=()
+while IFS= read -r candidate; do
+  [[ -n $candidate ]] || continue
+  [[ $candidate =~ ^https://[[:graph:]]+$ ]] || continue
+  urls+=("$candidate")
+done <<< "${fast_urls:-}"
+
+if (( ${#urls[@]} == 0 )); then
   echo "Failed to fetch speed test endpoints" >&2
   exit 1
 fi
@@ -82,20 +94,24 @@ traffic_worker() {
   if [[ $direction == "down" ]]; then
     while true; do
       url=${urls[$((idx % url_count))]}
-      curl -fsS -o /dev/null "$url" 2>/dev/null || return
+      curl -q -fsS -o /dev/null -- "$url" 2>/dev/null || return
       idx=$((idx + 1))
     done
   else
     while true; do
       url=${urls[$((idx % url_count))]}
-      dd if=/dev/zero bs=1M count=64 2>/dev/null | curl -fsS -o /dev/null -X POST --data-binary @- "$url" 2>/dev/null || return
+      # 16 MiB per POST, not 64: curl buffers --data-binary @- in memory and the
+      # 64 MiB address-space cap above would make it fail with "out of memory",
+      # so the upload phase reported 0 Mbps. The panel keeps sampling for up to
+      # 12 seconds, so the smaller body is re-posted instead of streamed once.
+      dd if=/dev/zero bs=1M count=16 2>/dev/null | curl -q -fsS -o /dev/null -X POST --data-binary @- -- "$url" 2>/dev/null || return
       idx=$((idx + 1))
     done
   fi
 }
 
 for (( i = 0; i < parallel; i++ )); do
-  traffic_worker $fast_urls &
+  traffic_worker "${urls[@]}" &
   traffic_pids+=("$!")
 done
 
