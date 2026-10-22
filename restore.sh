@@ -1,7 +1,7 @@
 #!/bin/bash
 # Restore hook: re-install wifi-dns from this repo if missing.
 # ~/.config survives updates, so this normally no-ops. Run manually or from
-# a post-update hook: ~/.config/omarchy/hooks/post-update.d/resty-network.hook
+# a post-update hook: ~/.config/omarchy/hooks/post-update.d/wifi-dns.hook
 set -u
 SRC="$(cd "$(dirname "$0")" && pwd)"
 DST="$HOME/.config/omarchy/plugins/wifi-dns"
